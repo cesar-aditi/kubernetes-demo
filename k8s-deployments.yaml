@@ -1,0 +1,469 @@
+# -------------------------------------------------------
+# Namespace + guardrails
+# FIX: was missing — no resource limits enforced
+# -------------------------------------------------------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-quota
+  namespace: production
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+    services.loadbalancers: "1"   # FIX: enforce single LB (the ingress only)
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limits
+  namespace: production
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+---
+# -------------------------------------------------------
+# Secret — demo values, no hardcoded env vars
+# FIX: was plaintext in Deployment env vars
+# -------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: production
+type: Opaque
+stringData:
+  db-password: "demo-password-replace-in-production"
+  database-url: "postgresql://db-host:5432/appdb"
+---
+# -------------------------------------------------------
+# ConfigMaps — custom HTML pages for the demo
+# -------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-html
+  namespace: production
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Acme Corp — Frontend</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #0d1117; color: #eee; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #161b22; border: 2px solid #2ea043; border-radius: 12px; padding: 40px 60px; text-align: center; max-width: 540px; }
+        h1 { color: #2ea043; font-size: 2em; margin-bottom: 8px; }
+        .badge { background: #2ea043; color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: bold; }
+        .stat { margin: 12px 0; font-size: 1.1em; color: #aaa; }
+        .stat span { color: #2ea043; font-weight: bold; }
+        .saving { color: #58a6ff; font-weight: bold; }
+        p { color: #888; font-size: 0.9em; margin-top: 24px; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="badge">✓ AFTER OPTIMIZATION</div>
+        <h1>Acme Corp</h1>
+        <h2>Frontend Service</h2>
+        <div class="stat">Replicas: <span>2 (HPA: 2–20)</span></div>
+        <div class="stat">Memory request: <span>300Mi per pod</span></div>
+        <div class="stat">CPU request: <span>150m per pod</span></div>
+        <div class="stat">Service type: <span>ClusterIP + Ingress</span></div>
+        <div class="stat">Node type: <span>e2-standard-4 spot</span></div>
+        <p>Est. monthly infra cost: <strong style="color:#2ea043">~$348</strong>
+        <br><span class="saving">Saving $2,277/mo vs before (87%)</span></p>
+      </div>
+    </body>
+    </html>
+  nginx.conf: |
+    server {
+      listen 80;
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+      location /health {
+        return 200 'ok';
+        add_header Content-Type text/plain;
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-html
+  namespace: production
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Acme Corp — Backend API</title>
+      <style>
+        body { font-family: Arial, sans-serif; background: #0d1117; color: #eee; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #161b22; border: 2px solid #2ea043; border-radius: 12px; padding: 40px 60px; text-align: center; max-width: 540px; }
+        h1 { color: #2ea043; font-size: 2em; margin-bottom: 8px; }
+        .badge { background: #2ea043; color: white; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: bold; }
+        .stat { margin: 12px 0; font-size: 1.1em; color: #aaa; }
+        .stat span { color: #2ea043; font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="badge">✓ AFTER OPTIMIZATION</div>
+        <h1>Acme Corp</h1>
+        <h2>Backend API Service</h2>
+        <div class="stat">Replicas: <span>2 (HPA: 2–15)</span></div>
+        <div class="stat">Memory request: <span>800Mi per pod</span></div>
+        <div class="stat">CPU request: <span>400m per pod</span></div>
+        <div class="stat">Service type: <span>ClusterIP (no extra LB)</span></div>
+      </div>
+    </body>
+    </html>
+  nginx.conf: |
+    server {
+      listen 80;
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+      }
+      location /health {
+        return 200 'ok';
+        add_header Content-Type text/plain;
+      }
+    }
+---
+# -------------------------------------------------------
+# frontend
+# FIX: replicas 10→2, requests 2Gi/1000m → 300Mi/150m
+# FIX: probes, spot toleration, secrets from Secret object
+# -------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      tolerations:
+      - key: "cloud.google.com/gke-spot"
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: frontend
+      containers:
+      - name: frontend
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "300Mi"   # FIX: was 2Gi
+            cpu: "150m"       # FIX: was 1000m
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets   # FIX: no hardcoded secrets
+              key: db-password
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: config
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: html
+        configMap:
+          name: frontend-html
+          items:
+          - key: index.html
+            path: index.html
+      - name: config
+        configMap:
+          name: frontend-html
+          items:
+          - key: nginx.conf
+            path: default.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: production
+spec:
+  type: ClusterIP   # FIX: was LoadBalancer ($18/mo) — Ingress handles external traffic
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+# -------------------------------------------------------
+# backend-api
+# FIX: replicas 8→2, requests 4Gi/2000m → 800Mi/400m
+# -------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-api
+  namespace: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-api
+  template:
+    metadata:
+      labels:
+        app: backend-api
+    spec:
+      tolerations:
+      - key: "cloud.google.com/gke-spot"
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: backend-api
+      containers:
+      - name: backend-api
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "800Mi"   # FIX: was 4Gi
+            cpu: "400m"       # FIX: was 2000m
+          limits:
+            memory: "1536Mi"
+            cpu: "1000m"
+        env:
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: db-password
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        - name: config
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: html
+        configMap:
+          name: backend-html
+          items:
+          - key: index.html
+            path: index.html
+      - name: config
+        configMap:
+          name: backend-html
+          items:
+          - key: nginx.conf
+            path: default.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-api-service
+  namespace: production
+spec:
+  type: ClusterIP   # FIX: was LoadBalancer
+  selector:
+    app: backend-api
+  ports:
+  - port: 80
+    targetPort: 80
+---
+# -------------------------------------------------------
+# batch-worker — CronJob replacing always-on Deployment
+# FIX: was 4 replicas 24/7; now runs 2h/night only
+# -------------------------------------------------------
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: batch-worker
+  namespace: production
+spec:
+  schedule: "0 2 * * *"
+  timeZone: "America/Sao_Paulo"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      template:
+        spec:
+          restartPolicy: OnFailure
+          tolerations:
+          - key: "cloud.google.com/gke-spot"
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
+          containers:
+          - name: batch-worker
+            image: busybox:1.35
+            command: ["sh", "-c", "echo 'Batch job running'; sleep 5; echo 'Done'"]
+            resources:
+              requests:
+                memory: "2Gi"
+                cpu: "1000m"
+              limits:
+                memory: "4Gi"
+                cpu: "2000m"
+---
+# -------------------------------------------------------
+# HPA — fixed: minReplicas low enough to actually scale down
+# FIX: autoscaling/v2, CPU + memory metrics, scale-down policy
+# -------------------------------------------------------
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 2    # FIX: was 10 — can now scale down
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-api-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend-api
+  minReplicas: 2    # FIX: was 8
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 65
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 75
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+# -------------------------------------------------------
+# Ingress — no host: field so it works on the raw IP
+# FIX: replaces 3 individual LoadBalancers ($54/mo → $18/mo)
+# Access: http://INGRESS_IP/       → frontend
+#         http://INGRESS_IP/api/   → backend
+# -------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prod-ingress
+  namespace: production
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - http:                         # No host: — works on raw IP for the demo
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-api-service
+            port:
+              number: 80
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
