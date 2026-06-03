@@ -34,6 +34,75 @@ metadata:
 automountServiceAccountToken: false
 ---
 # -------------------------------------------------------
+# Least-privilege Roles and RoleBindings per workload.
+# None of these workloads need Kubernetes API access, so
+# we grant an empty Role — just enough to satisfy the
+# binding requirement with an explicit least-privilege stance.
+# -------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: frontend-role
+  namespace: production
+rules: []   # frontend (nginx serving static HTML) requires no Kubernetes API access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: frontend-rolebinding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: frontend-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: frontend-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: backend-api-role
+  namespace: production
+rules: []   # backend-api (nginx serving API) requires no Kubernetes API access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: backend-api-rolebinding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: backend-api-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: backend-api-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: batch-worker-role
+  namespace: production
+rules: []   # batch-worker (busybox echo/sleep job) requires no Kubernetes API access
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: batch-worker-rolebinding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: batch-worker-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: batch-worker-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# -------------------------------------------------------
 # NetworkPolicies — default-deny + explicit allow rules
 # Restricts pod-to-pod traffic to only required paths.
 # -------------------------------------------------------

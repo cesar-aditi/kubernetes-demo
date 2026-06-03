@@ -84,8 +84,8 @@ resource "google_compute_subnetwork" "ilb_subnet" {
   ip_cidr_range = "10.53.0.0/24"
   region        = var.region
   network       = google_compute_network.vpc.id
-  purpose       = "REGIONAL_MANAGED_PROXY"
-  role          = "ACTIVE"
+  # Dedicated subnet for internal TCP/UDP load balancers — keeps LB traffic
+  # isolated from node subnet and prevents node IP exhaustion
 }
 
 # -------------------------------------------------------
