@@ -65,6 +65,66 @@ resource "google_compute_router_nat" "nat" {
   region                             = var.region
   nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+
+  # Security hardening: dynamic port allocation and reduced TIME_WAIT for high-connection-volume clusters
+  enable_dynamic_port_allocation = true
+  min_ports_per_vm               = 64
+  max_ports_per_vm               = 2048
+  tcp_time_wait_timeout_sec      = 5   # reduced from default 120s
+  enable_endpoint_independent_mapping = false
+}
+
+# -------------------------------------------------------
+# Dedicated subnet for internal load balancer Services
+# Prevents node subnet exhaustion and enables separate
+# security filtering for internal LB traffic
+# -------------------------------------------------------
+resource "google_compute_subnetwork" "ilb_subnet" {
+  name          = "${var.cluster_name}-ilb-subnet"
+  ip_cidr_range = "10.53.0.0/24"
+  region        = var.region
+  network       = google_compute_network.vpc.id
+  purpose       = "REGIONAL_MANAGED_PROXY"
+  role          = "ACTIVE"
+}
+
+# -------------------------------------------------------
+# Security bulletin notifications via Pub/Sub
+# -------------------------------------------------------
+resource "google_pubsub_topic" "gke_security_bulletins" {
+  name = "${var.cluster_name}-security-bulletins"
+
+  labels = {
+    env     = var.environment
+    purpose = "gke-security-bulletins"
+  }
+}
+
+resource "google_pubsub_subscription" "gke_security_bulletins_sub" {
+  name  = "${var.cluster_name}-security-bulletins-sub"
+  topic = google_pubsub_topic.gke_security_bulletins.name
+
+  # Retain undelivered messages for 7 days
+  message_retention_duration = "604800s"
+  retain_acked_messages      = false
+
+  ack_deadline_seconds = 60
+}
+
+# Route security bulletin notifications to Cloud Logging via log sink
+resource "google_logging_project_sink" "gke_security_bulletins_sink" {
+  name        = "${var.cluster_name}-bulletins-sink"
+  destination = "pubsub.googleapis.com/${google_pubsub_topic.gke_security_bulletins.id}"
+
+  filter = "resource.type=\"pubsub_topic\" AND resource.labels.topic_id=\"${google_pubsub_topic.gke_security_bulletins.name}\""
+
+  unique_writer_identity = true
+}
+
+resource "google_pubsub_topic_iam_member" "log_sink_publisher" {
+  topic  = google_pubsub_topic.gke_security_bulletins.name
+  role   = "roles/pubsub.publisher"
+  member = google_logging_project_sink.gke_security_bulletins_sink.writer_identity
 }
 
 # -------------------------------------------------------
@@ -136,6 +196,25 @@ resource "google_container_cluster" "primary" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  # Disable ABAC — use IAM + RBAC exclusively
+  enable_legacy_abac = false
+
+  # Disable legacy client certificate and password authentication
+  master_auth {
+    client_certificate_config {
+      issue_client_certificate = false
+    }
+  }
+
+  # Enable Dataplane V2 (eBPF) for integrated network policy enforcement and observability
+  datapath_provider = "ADVANCED_DATAPATH"
+
+  # Enable Kubernetes NetworkPolicy enforcement
+  network_policy {
+    enabled  = true
+    provider = "CALICO"
+  }
+
   addons_config {
     horizontal_pod_autoscaling {
       disabled = false   # FIX: was disabled
@@ -146,6 +225,20 @@ resource "google_container_cluster" "primary" {
     gce_persistent_disk_csi_driver_config {
       enabled = true
     }
+    # NodeLocal DNSCache — reduces DNS lookup latency, avoids tracked open connections
+    dns_cache_config {
+      enabled = true
+    }
+    network_policy_config {
+      disabled = false
+    }
+  }
+
+  # Use Cloud DNS for GKE instead of cluster-hosted kube-dns/CoreDNS
+  dns_config {
+    cluster_dns        = "CLOUD_DNS"
+    cluster_dns_scope  = "CLUSTER_SCOPE"
+    cluster_dns_domain = "cluster.local"
   }
 
   # FIX: VPA for right-sizing recommendations
@@ -189,6 +282,9 @@ resource "google_container_cluster" "primary" {
     channel = "REGULAR"
   }
 
+  # Enable Shielded GKE Nodes cluster-wide
+  enable_shielded_nodes = true
+
   lifecycle {
     ignore_changes = [initial_node_count]
   }
@@ -222,8 +318,17 @@ resource "google_container_node_pool" "spot_workload" {
     disk_type       = "pd-balanced"                            # FIX: was pd-ssd
     service_account = google_service_account.gke_node_sa.email # FIX: least-privilege SA
 
+    # COS is the hardened, container-optimized node OS (required by enterprise rule)
+    image_type = "COS_CONTAINERD"
+
     workload_metadata_config {
       mode = "GKE_METADATA"
+    }
+
+    # Shielded node: secure boot + integrity monitoring prevent boot-level attacks
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
     }
 
     taint {
@@ -273,8 +378,17 @@ resource "google_container_node_pool" "ondemand_critical" {
     disk_type       = "pd-balanced"
     service_account = google_service_account.gke_node_sa.email
 
+    # COS is the hardened, container-optimized node OS (required by enterprise rule)
+    image_type = "COS_CONTAINERD"
+
     workload_metadata_config {
       mode = "GKE_METADATA"
+    }
+
+    # Shielded node: secure boot + integrity monitoring prevent boot-level attacks
+    shielded_instance_config {
+      enable_secure_boot          = true
+      enable_integrity_monitoring = true
     }
 
     labels = {

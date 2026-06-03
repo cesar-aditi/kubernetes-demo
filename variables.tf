@@ -22,9 +22,10 @@ variable "environment" {
 }
 
 variable "authorized_cidr" {
-  description = "CIDR allowed to reach the GKE API server"
+  description = "CIDR allowed to reach the GKE API server. Must be a specific IP range (e.g. your VPN/office CIDR). Do NOT use 0.0.0.0/0 in production — this exposes the control plane to the internet."
   type        = string
-  default     = "0.0.0.0/0"   # Restrict to your VPN/office IP in production
+  # No default: callers must explicitly provide a trusted CIDR.
+  # Example: "203.0.113.0/24" (your corporate VPN egress range)
 }
 
 variable "spot_min_nodes" {

@@ -7,6 +7,130 @@ kind: Namespace
 metadata:
   name: production
 ---
+# -------------------------------------------------------
+# Dedicated ServiceAccounts — one per workload (RBAC best practice)
+# automountServiceAccountToken: false — none of these workloads
+# need to call the Kubernetes API, so tokens must not be mounted.
+# -------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend-sa
+  namespace: production
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend-api-sa
+  namespace: production
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: batch-worker-sa
+  namespace: production
+automountServiceAccountToken: false
+---
+# -------------------------------------------------------
+# NetworkPolicies — default-deny + explicit allow rules
+# Restricts pod-to-pod traffic to only required paths.
+# -------------------------------------------------------
+# Default deny all ingress and egress in the namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# Allow frontend to receive traffic from the ingress controller
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80
+---
+# Allow frontend to call backend-api
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: backend-api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 80
+---
+# Allow egress to DNS (required by all pods)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+# Allow frontend and backend-api egress to required services
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-app-egress
+  namespace: production
+spec:
+  podSelector:
+    matchLabels: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: backend-api
+    ports:
+    - protocol: TCP
+      port: 80
+---
 apiVersion: v1
 kind: ResourceQuota
 metadata:
@@ -167,18 +291,21 @@ spec:
       labels:
         app: frontend
     spec:
+      serviceAccountName: frontend-sa
+      automountServiceAccountToken: false
       tolerations:
       - key: "cloud.google.com/gke-spot"
         operator: Equal
         value: "true"
         effect: NoSchedule
-      topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app: frontend
+      # Hard zone anti-affinity: pods MUST spread across zones (not soft preference)
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: frontend
+            topologyKey: topology.kubernetes.io/zone
       containers:
       - name: frontend
         image: nginx:1.21
@@ -260,18 +387,21 @@ spec:
       labels:
         app: backend-api
     spec:
+      serviceAccountName: backend-api-sa
+      automountServiceAccountToken: false
       tolerations:
       - key: "cloud.google.com/gke-spot"
         operator: Equal
         value: "true"
         effect: NoSchedule
-      topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app: backend-api
+      # Hard zone anti-affinity: pods MUST spread across zones (not soft preference)
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app: backend-api
+            topologyKey: topology.kubernetes.io/zone
       containers:
       - name: backend-api
         image: nginx:1.21
@@ -356,6 +486,8 @@ spec:
       template:
         spec:
           restartPolicy: OnFailure
+          serviceAccountName: batch-worker-sa
+          automountServiceAccountToken: false
           tolerations:
           - key: "cloud.google.com/gke-spot"
             operator: Equal
