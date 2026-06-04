@@ -10,10 +10,12 @@ terraform {
       version = "~> 5.0"
     }
   }
+
   backend "gcs" {
-    bucket = "REPLACE_WITH_YOUR_TFSTATE_BUCKET"   # replace with your bucket name
+    bucket = "cloud-practice-sandbox-tfstate"
     prefix = "after"
   }
+
 }
 
 provider "google" {
@@ -50,6 +52,7 @@ resource "google_compute_subnetwork" "subnet" {
     range_name    = "services"
     ip_cidr_range = "10.52.0.0/20"
   }
+
 }
 
 # Cloud NAT — lets private nodes reach internet (pull images) without public IPs
